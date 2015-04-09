@@ -1,0 +1,173 @@
+#cloud-config
+
+{#
+  Why restart getty? getty service may start before cloud-init. We restart getty so it can pick up
+  the drop-in created by cloud-init.
+#}
+{% set getty_restart_unit = 'getty-restart' %}
+{% set getty_drop_in = '/etc/systemd/system/getty@tty1.service.d/50-ship.conf' %}
+{% set getty_restart = '/ship/getty/restart' %}
+{% set getty_restarted = '/ship/getty/restarted' %}
+{% set getty_run = '/ship/getty/run' %}
+{% set enable_swap = '/ship/enable-swap' %}
+{% set sail = '/ship/sail' %}
+{% set loader_getty = '/ship/loader/getty' %}
+{% set loader_run = '/ship/loader/run' %}
+{% set repo_file = loader_run + '/repo' %}
+{% set tag_file = loader_run + '/tag' %}
+{% set target_file = loader_run + '/target' %}
+
+hostname: {{ hostname }}
+
+coreos:
+  units:
+    - name: {{ getty_restart_unit }}.path
+      command: start
+      content: |
+        [Unit]
+        Description=Getty Restart path
+        [Path]
+        PathExists={{ getty_drop_in }}
+
+    - name: {{ getty_restart_unit }}.service
+      content: |
+        [Unit]
+        Description=Restart Getty
+        [Service]
+        ExecStart={{ getty_restart }}
+
+    - name: ship.service
+      command: start
+      content: |
+        [Unit]
+        Description=Ship Enterprise
+        After=docker.service
+        [Service]
+        ExecStart={{ sail }}
+
+    - name: swap.service
+      command: start
+      content: |
+        [Unit]
+        Description=Enable Swap
+        [Service]
+        ExecStart={{ enable_swap }}
+
+  oem:
+    id: ship-enterprise
+    name: Ship Enterprise
+    version-id: 0.1.1
+    home-url: http://www.shipenterprise.com/
+    bug-report-url: http://www.shipenterprise.com/
+
+  update:
+    reboot-strategy: off
+
+write_files:
+  - path: {{ getty_restart }}
+    permissions: 0700
+    content: |
+      #!/bin/bash
+      set -ex
+      if [ -f {{ getty_restarted }} ]; then exit 0; fi
+      systemctl daemon-reload
+      systemctl restart getty@tty1
+      touch {{ getty_restarted }}
+
+  - path: {{ getty_drop_in }}
+    content: |
+      [Service]
+      {# Clear ExecStart before we can overwrite it #}
+      ExecStart=
+      ExecStart=-/sbin/agetty --noclear --skip-login --autologin root --login-program {{ getty_run }} %I $TERM
+
+  - path: {{ getty_run }}
+    permissions: 0700
+    content: |
+      #!/bin/bash
+      set -e
+      {# No more console pollution from dmesg #}
+      dmesg -n 1
+      echo 'Loading console service...'
+
+      {# Create files if not exist #}
+      mkdir -p {{ loader_run }}
+      [[ -f {{ repo_file }} ]] || echo '{{ repo }}' > {{ repo_file }}
+      [[ -f {{ tag_file }} ]] || {
+        TAG=$(docker run --rm $(cat {{ repo_file }})/{{ loader_image }} tag)
+        echo ${TAG} > {{ tag_file }}
+      }
+
+      IMAGE="$(cat {{ repo_file }})/{{ loader_image }}:$(cat {{ tag_file }})"
+      docker run --rm -v {{ loader_getty }}:/host "${IMAGE}" install-getty /host
+      {# Don't rely on systemd's Restart= directive as the user may ^C in quick succession causing systemd to #}
+      {# disable the service. #}
+      while true; do {{ loader_getty }}/run; done
+
+  - path: {{ enable_swap }}
+    permissions: 0700
+    content: |
+      #!/bin/bash
+      set -e
+      if [ {{ swap_size }} = 0 ]; then exit 0; fi
+      if [ ! -f /swap ]; then
+        fallocate -l {{ swap_size }}m /swap
+        chmod 600 /swap
+        mkswap /swap
+      fi
+      swapon /swap
+
+  - path: {{ sail }}
+    permissions: 0700
+    content: |
+      #!/bin/bash
+      set -ex
+      while true; do
+        {# A potential bug in CoreOS (as of 554.0.0) may cause scope units remain running after a container stops. #}
+        {# Stop the unit here as it would block the container from restarting. #}
+        RUNNING="$(docker ps -q --no-trunc)"
+        for SCOPE in $(systemctl list-units --no-legend 'docker-*.scope' | awk '{print $1}'); do
+          ID=$(echo ${SCOPE} | sed -e 's/^docker-\(.*\)\.scope$/\1/')
+          {# Stop a Docker scope unit if the container ID it refers to is not in `docker ps` #}
+          [[ "$(echo "${RUNNING}" | grep ${ID})" ]] || (
+            echo "Stopping dangling unit ${SCOPE}..."
+            systemctl stop ${SCOPE}
+          )
+        done
+
+        {# Create files if not exist #}
+        mkdir -p {{ loader_run }}
+        [[ -f {{ repo_file }} ]] || echo '{{ repo }}' > {{ repo_file }}
+        [[ -f {{ target_file }} ]] || echo '{{ target }}' > {{ target_file }}
+        [[ -f {{ tag_file }} ]] || {
+          TAG=$(docker run --rm $(cat {{ repo_file }})/{{ loader_image }} tag)
+          echo ${TAG} > {{ tag_file }}
+        }
+
+        IMAGE="$(cat {{ repo_file }})/{{ loader_image }}:$(cat {{ tag_file }})"
+
+        {# Use the same container name across restarts as crane/docker doesn't update container links on restarts. #}
+        {# Attach tag to support live upgrades. #}
+        CONTAINER=loader-$(cat {{ tag_file }})
+
+        {# Create Loader container if not exist #}
+        [[ "$(docker ps -a | grep ${CONTAINER})" ]] || \
+            docker create --name "${CONTAINER}" \
+              -v /var/run/docker.sock:/var/run/docker.sock \
+              -v {{ repo_file }}:/host{{ repo_file }} \
+              -v {{ tag_file }}:/host{{ tag_file }} \
+              -v {{ target_file }}:/host{{ target_file }} \
+              "${IMAGE}" load /host{{ repo_file }} /host{{ tag_file }} /host{{ target_file }}
+
+        echo 'Starting Loader...'
+        docker start -a "${CONTAINER}"
+        echo 'Loader stopped'
+      done
+
+{% for key in extra_files %}
+  - path: /{{ key }}
+    encoding: gz+b64
+    content: |
+      {{ extra_files[key] }}
+
+{% endfor %}
