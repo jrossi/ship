@@ -104,9 +104,11 @@ the bash command-line prompt.
 will be named "foo.ova", "foo.qcow2", and so on.
 - `vm-disk-size`, `vm-ram-size`: sizes are in MB. 
 
-Lastly, call "vm/build.sh" to generate VM images to folder "out":
+Lastly, call "vm/build.sh" to generate outputs to folder "out":
 
-    $ <path_to_ship>/vm/build.sh ship.yml out
+    $ <path_to_ship>/vm/build.sh cloudinit,preloaded ship.yml out
+    
+At the time being only `cloudinit` and `preloaded` are supported as output formats.
 
 ### Step 3. Deliver the system
 
@@ -200,20 +202,35 @@ Only the containers in the target group and their dependencies are launched.
 - `POST /gc` removes old containers and their volume data that are left behind from
   `POST /switch`.
 
+### Web access
+
+The system implements a Web server that shows Docker image pulling progress as soon as the VM
+starts. It runs on port 80 of the VM and stops right before launching application contianers. After the Web server stops, the front-end code continuously polls the URL
+`http://<ip_of_vm>/ship-ready`. On the first successful response of this URL,
+code redirects the browser to `http://<ip_of_vm>`, which is expected to be the application's
+front page.
+
+To integrate with this Web access, the application shall:
+
+ 1. serve port 80 in plain HTTP as the application's front page. Redirects are allowed;
+ 2. return status code 2xx on the route `/ship-ready` if and only if the application is
+    ready to serve requests.
 
 ### Testing and CI
 
-You may test the Loader's API in your development environment:
+You may test the system in your development environment:
 
-    $ docker run coolapp/loader simulate-api registry.coolapp.com default
+    $ <path_to_ship>/emulate.sh ship.yml default
 
-This allows other containers to call the Loader container's API. The API acts as if it runs with the given registry and target name. `POST /boot` in simulation mode does not restart application containers or itself.
+It launches all the containers in the default container group using the local docker
+command. This method always uses the default registry and the `latest` tag, and ignores
+all the `repo` and `tag` parameters passed into the Loader API.
 
-You may also test the console service and your banner in development environment:
+You may also test the console service and appliance banner in development environment:
 
     $ docker run -it coolapp/loader simulate-getty
 
-This will simulate the console screen on your terminal. Because the simulation has no
+It simulates the console screen on your terminal. Because the simulation has no
 privileges to modify the host OS, menu options that require root
 privilege will not succeed. Press [^C] and enter "Y" to exit simulation.
 
@@ -224,16 +241,27 @@ to inject commands into the image. It is useful, say, if you want to set up a
 so test suites can easily find the VM.
 
 
-## IT admin & site engineer manual
+## IT administrator manual
 
-The VM's console service has two hidden commands:
+### Console access
 
-**logs** shows logs of a given Docker container running at the current tag (i.e. version).
+The VM's virtual terminal allows admins to view and modify the VM's networking settings.
+Additionally, the console has two commands that are hidden from the menu:
 
-**root-shell** launches an interactive shell with root privileges. An environmental variable
+Type `logs` to show Docker logs of a given container running at the current tag (i.e. version).
+
+Type `root-shell` to launch an interactive shell with root privileges. An environmental variable
 `TAG` will be set to be the current tag. You may use it to access the containers conveniently:
 
     $ docker logs loader-$TAG
+    
+### Web access
+
+As soon as the VM starts the admin can visit the VM's IP on a browser to monitor
+appliance loading progress. It is particularly useful for the `cloudinit` output format
+as it may take time to pull application images from the Internet. After the application is
+successfully launched, the Web UI automatically redirects the browser to the application's
+front page.
 
 ## Internal design notes
 

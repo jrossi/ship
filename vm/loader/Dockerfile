@@ -1,29 +1,26 @@
-FROM debian:sid
+FROM ubuntu:15.04
 
 MAINTAINER Weihan Wang "weihan@aerofs.com"
 
-# Install docker. `apt-get install docker.io` doesn't work on sid at the time of writing
-RUN apt-get update && apt-get install -y wget &&\
-    wget -qO- https://get.docker.com/ | sh &&\
-    # Clean up
-    apt-get purge -y wget &&\
-    apt-get autoremove -y &&\
+# Pin docker to 1.5.0 otherwise some base CoreOS images might not have the docker
+# daemon with an API recent enough to support us.
+# The following steps are adapted from https://get.docker.com.
+RUN \
+    apt-get update &&\
+    apt-get install -y apt-transport-https ca-certificates &&\
+    apt-key adv --keyserver hkp://p80.pool.sks-keyservers.net:80 --recv-keys 36A1D7869245C8950F966E92D8576A8BA88D21E9 &&\
+    echo deb https://get.docker.com/ubuntu docker main > /etc/apt/sources.list.d/docker.list &&\
+    apt-get update &&\
+    apt-get install -y lxc-docker-1.5.0 &&\
     rm -rf /var/lib/apt/lists/*
 
-# Build crane
-ENV GOPATH /go
-ENV CRANE_URL github.com/michaelsauter/crane
-ENV CRANE_VERSION v1.1.1
-RUN apt-get update && apt-get install -y git golang &&\
-    go get -d $CRANE_URL &&\
-    cd $GOPATH/src/$CRANE_URL &&\
-    git checkout $CRANE_VERSION &&\
-    cd / &&\
-    go build -o /usr/local/bin/crane $CRANE_URL &&\
-    # Clean up
-    rm -r $GOPATH &&\
-    apt-get purge -y git golang &&\
-    apt-get autoremove -y &&\
+# Install crane
+RUN \
+    apt-get update &&\
+    apt-get install -y wget &&\
+    wget https://github.com/michaelsauter/crane/releases/download/v1.1.1/crane_linux_amd64 -O /usr/local/bin/crane &&\
+    chmod 0755 /usr/local/bin/crane &&\
+    apt-get purge --auto-remove -y wget &&\
     rm -rf /var/lib/apt/lists/*
 
 # Install python and its packages. Partially adapted from
